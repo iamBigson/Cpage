@@ -111,14 +111,21 @@ def find_contact_page(homepage_url):
     return homepage_url, False
 
 
-def send_telegram(bot_token, chat_id, message):
+def send_telegram(bot_token, chat_id, message, parse_mode=None):
+    payload = {"chat_id": chat_id, "text": message, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     resp = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
+        json=payload,
         timeout=REQUEST_TIMEOUT,
     )
     if resp.status_code != 200:
         print(f"WARNING: Telegram send failed: {resp.text}", file=sys.stderr)
+
+
+def escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def main():
@@ -180,36 +187,50 @@ def main():
     save_seen(seen)
 
     if not new_leads:
-        send_telegram(tg_token, tg_chat, f"Session: {query}\nNo new domains found (all results already seen).")
+        send_telegram(
+            tg_token, tg_chat,
+            f"🔍 <b>{escape_html(query)}</b>\n\nNo new domains found — all results already seen.",
+            parse_mode="HTML",
+        )
         print("No new leads found.")
         return
 
-    header = f"🎯 {query}\nFound {len(new_leads)} new domain(s):\n"
-    lines = []
-    for domain, contact_url, found in new_leads:
-        flag = "" if found else " (no contact page found, homepage shown)"
-        lines.append(f"• {domain}\n  {contact_url}{flag}")
+    header = (
+        f"🎯 <b>{escape_html(query)}</b>\n"
+        f"✅ {len(new_leads)} new lead(s) found\n"
+        f"{'─' * 24}\n"
+    )
 
-    message = header + "\n".join(lines)
+    blocks = []
+    for i, (domain, contact_url, found) in enumerate(new_leads, start=1):
+        c_page_label = "C page" if found else "C page (not found, homepage below)"
+        block = (
+            f"<b>{i}. {escape_html(domain)}</b>\n"
+            f"🌐 Domain: {escape_html(domain)}\n"
+            f"📩 {c_page_label}: {escape_html(contact_url)}"
+        )
+        blocks.append(block)
+
+    message = header + "\n\n".join(blocks)
 
     # Telegram has a 4096 char limit per message; chunk if needed
     if len(message) <= 4000:
-        send_telegram(tg_token, tg_chat, message)
+        send_telegram(tg_token, tg_chat, message, parse_mode="HTML")
     else:
-        send_telegram(tg_token, tg_chat, header)
+        send_telegram(tg_token, tg_chat, header, parse_mode="HTML")
         chunk = ""
-        for line in lines:
-            if len(chunk) + len(line) > 3800:
-                send_telegram(tg_token, tg_chat, chunk)
+        for block in blocks:
+            if len(chunk) + len(block) > 3800:
+                send_telegram(tg_token, tg_chat, chunk, parse_mode="HTML")
                 chunk = ""
-            chunk += line + "\n"
+            chunk += block + "\n\n"
         if chunk:
-            send_telegram(tg_token, tg_chat, chunk)
+            send_telegram(tg_token, tg_chat, chunk, parse_mode="HTML")
 
     if len(new_leads) < TARGET_NEW:
         send_telegram(
             tg_token, tg_chat,
-            f"⚠️ Only found {len(new_leads)}/{TARGET_NEW} new domains before hitting the search cap ({MAX_PAGES} pages)."
+            f"⚠️ Only found {len(new_leads)}/{TARGET_NEW} new domains before hitting the search cap ({MAX_PAGES} pages).",
         )
 
     print(f"Done. Sent {len(new_leads)} leads to Telegram.")
