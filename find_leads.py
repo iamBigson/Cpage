@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Lead finder: searches for `<keyword> in <state>`, finds domains never seen
-before (tracked in seen_domains.json), tries to locate each site's contact
-page, and sends results to Telegram. Always finds up to 15 new domains
+before (tracked in seen_domains.json), filters to only domains hosted on
+Microsoft/Office 365 (Outlook) mail (skips Google Workspace, any other
+host, or undetermined), tries to locate each site's contact page, and
+sends results to Telegram. Always finds up to 15 new qualifying domains
 per run (or exhausts a 20-page search cap trying).
 
 Required environment variables (set as GitHub repo secrets):
@@ -20,6 +22,7 @@ import json
 import re
 import time
 import requests
+import dns.resolver
 from urllib.parse import urlparse, urljoin
 
 SEEN_FILE = "seen_domains.json"
@@ -27,12 +30,19 @@ TARGET_NEW = 15
 MAX_PAGES = 20
 RESULTS_PER_PAGE = 10
 REQUEST_TIMEOUT = 10
+DNS_TIMEOUT = 5
 
 CONTACT_PATTERNS = [
     "contact", "contact-us", "contactus", "get-in-touch", "getintouch",
     "book", "booking", "inquire", "inquiry", "enquiry", "request-quote",
     "quote", "reach-us", "reach-out", "connect"
 ]
+
+# Hostname fragments that identify Microsoft/Office 365 (Outlook) mail hosting
+MICROSOFT_MX_MARKERS = ["outlook.com", "protection.outlook.com", "mail.protection.outlook.com"]
+
+# Hostname fragments that identify Google Workspace mail hosting (for logging clarity only)
+GOOGLE_MX_MARKERS = ["google.com", "googlemail.com", "aspmx.l.google.com"]
 
 
 def get_env(name):
@@ -65,6 +75,27 @@ def normalize_domain(url):
         return None
 
 
+def is_office365(domain):
+    """
+    Look up MX records for the domain. Returns True only if the mail
+    hosting is confirmed Microsoft/Office 365 (Outlook). Google Workspace,
+    any other provider, or a failed/empty lookup all return False.
+    """
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = DNS_TIMEOUT
+        resolver.lifetime = DNS_TIMEOUT
+        answers = resolver.resolve(domain, "MX")
+        exchanges = [str(r.exchange).rstrip(".").lower() for r in answers]
+    except Exception:
+        return False
+
+    for exchange in exchanges:
+        if any(marker in exchange for marker in MICROSOFT_MX_MARKERS):
+            return True
+    return False
+
+
 def serper_search(api_key, query, page):
     """Fetch one page (10 results) from Serper. page=1 is first page."""
     resp = requests.post(
@@ -95,7 +126,6 @@ def find_contact_page(homepage_url):
     except Exception:
         return homepage_url, False
 
-    # crude but dependency-free link scan: find href="..." plus nearby text
     links = re.findall(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
 
     for href, text in links:
@@ -104,7 +134,6 @@ def find_contact_page(homepage_url):
         for pattern in CONTACT_PATTERNS:
             if pattern in href_lower or pattern in clean_text:
                 full_url = urljoin(homepage_url, href)
-                # avoid mailto/tel links here, we want a page
                 if full_url.startswith("http"):
                     return full_url, True
 
@@ -142,8 +171,9 @@ def main():
     tg_chat = get_env("TELEGRAM_CHAT_ID")
 
     seen = load_seen()
-    new_leads = []  # list of (domain, contact_url, found_bool)
+    new_leads = []
     seen_this_session = set()
+    skipped_not_office = 0
 
     print(f"Query: {query}")
     print(f"Already-seen domains on file: {len(seen)}")
@@ -171,25 +201,33 @@ def main():
                 continue
 
             seen_this_session.add(domain)
+
+            if not is_office365(domain):
+                skipped_not_office += 1
+                print(f"  - skipped (not Office 365): {domain}")
+                continue
+
             homepage = f"https://{domain}"
             contact_url, found = find_contact_page(homepage)
             new_leads.append((domain, contact_url, found))
-            print(f"  + new domain: {domain} (contact page found: {found})")
+            print(f"  + new Office 365 domain: {domain} (contact page found: {found})")
 
             if len(new_leads) >= TARGET_NEW:
                 break
 
         page += 1
-        time.sleep(0.5)  # be polite between search pages
+        time.sleep(0.5)
 
-    # Update dedup file with everything found this session (even if we stopped early)
     seen.update(seen_this_session)
     save_seen(seen)
+
+    print(f"Skipped (not Office 365 or undetermined): {skipped_not_office}")
 
     if not new_leads:
         send_telegram(
             tg_token, tg_chat,
-            f"🔍 <b>{escape_html(query)}</b>\n\nNo new domains found — all results already seen.",
+            f"🔍 <b>{escape_html(query)}</b>\n\nNo new Office 365 domains found "
+            f"({skipped_not_office} checked and skipped — not Office 365 or undetermined).",
             parse_mode="HTML",
         )
         print("No new leads found.")
@@ -197,7 +235,7 @@ def main():
 
     header = (
         f"🎯 <b>{escape_html(query)}</b>\n"
-        f"✅ {len(new_leads)} new lead(s) found\n"
+        f"✅ {len(new_leads)} new lead(s) found (Office 365 only)\n"
         f"{'─' * 24}\n"
     )
 
@@ -213,7 +251,6 @@ def main():
 
     message = header + "\n\n".join(blocks)
 
-    # Telegram has a 4096 char limit per message; chunk if needed
     if len(message) <= 4000:
         send_telegram(tg_token, tg_chat, message, parse_mode="HTML")
     else:
@@ -230,7 +267,7 @@ def main():
     if len(new_leads) < TARGET_NEW:
         send_telegram(
             tg_token, tg_chat,
-            f"⚠️ Only found {len(new_leads)}/{TARGET_NEW} new domains before hitting the search cap ({MAX_PAGES} pages).",
+            f"⚠️ Only found {len(new_leads)}/{TARGET_NEW} new Office 365 domains before hitting the search cap ({MAX_PAGES} pages).",
         )
 
     print(f"Done. Sent {len(new_leads)} leads to Telegram.")
