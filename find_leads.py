@@ -104,7 +104,12 @@ def serper_search(api_key, query, page):
         json={"q": query, "page": page},
         timeout=REQUEST_TIMEOUT,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # Include Serper's response details in the Actions log to help diagnose
+        # rejected requests, without ever logging the API key.
+        detail = resp.text[:1000].replace("\n", " ")
+        print(f"Serper API error (HTTP {resp.status_code}): {detail}", file=sys.stderr)
+        resp.raise_for_status()
     data = resp.json()
     return data.get("organic", [])
 
@@ -183,8 +188,10 @@ def main():
         try:
             results = serper_search(serper_key, query, page)
         except Exception as e:
-            print(f"Search error on page {page}: {e}", file=sys.stderr)
-            break
+            # Fail the job instead of reporting a search failure as zero results.
+            # Exit before changing seen_domains.json or sending a misleading message.
+            print(f"Search failed on page {page}; aborting run: {e}", file=sys.stderr)
+            sys.exit(1)
 
         if not results:
             print(f"No more results at page {page}, stopping search.")
