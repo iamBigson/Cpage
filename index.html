@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cpage</title>
+<style>
+:root{--bg:#eef1f5;--card:#fff;--ink:#14202e;--mute:#5d6b7c;--line:#d8dee7;--accent:#2f5bea;--accent-ink:#fff;--ok:#18794e;--bad:#c4321f;--warn:#a85d00;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1722;--card:#17212f;--ink:#e8edf4;--mute:#92a0b3;--line:#27354a;--accent:#6c8cff;--accent-ink:#0f1722;--ok:#4cc38a;--bad:#ff7a66;--warn:#f0b04a;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:max(20px,env(safe-area-inset-top)) 16px max(32px,env(safe-area-inset-bottom))}
+main{max-width:520px;margin:0 auto}
+h1{font-size:28px;letter-spacing:-.02em;margin:8px 0 2px}
+.sub{color:var(--mute);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+label{display:block;font-size:14px;font-weight:600;margin:0 0 6px}
+input{width:100%;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+input:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:13px 16px;background:var(--accent);color:var(--accent-ink);width:100%;cursor:pointer}
+button[disabled]{opacity:.55;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line);width:auto;padding:8px 12px;font-size:14px}
+details summary{cursor:pointer;font-weight:600}
+details ol{color:var(--mute);padding-left:20px;margin:10px 0 14px;font-size:14px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.status{display:flex;gap:10px;align-items:center}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--mute);flex:none}
+.dot.queued{background:var(--warn)}
+.dot.running{background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+.dot.done{background:var(--ok)}
+.dot.failed{background:var(--bad)}
+@keyframes pulse{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.dot.running{animation:none}}
+.big{font-weight:700}
+.mute{color:var(--mute);font-size:14px}
+.msg{font-size:14px;margin:10px 0 0;min-height:1.2em}
+.msg.err{color:var(--bad)}
+.hist{list-style:none;margin:0;padding:0}
+.hist li{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-top:1px solid var(--line)}
+.hist li:first-child{border-top:0}
+.hist a{color:inherit;text-decoration:none;flex:1;min-width:0}
+.hist .t{overflow-wrap:anywhere}
+.hist .dot{margin-top:6px}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.head h2{font-size:17px;margin:0}
+</style>
+</head>
+<body>
+<main>
+<h1>Cpage</h1>
+<p class="sub">Find Office 365 leads, delivered to Telegram.</p>
+
+<details class="card" id="setup" open>
+<summary>Connect your repo</summary>
+<ol>
+<li>On GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.</li>
+<li>Repository access: only select your Cpage repo.</li>
+<li>Permissions: Actions → Read and write. Generate and copy the token.</li>
+<li>Paste it below. It stays in this browser only.</li>
+</ol>
+<div class="row">
+<div><label for="owner">GitHub username</label><input id="owner" autocomplete="off" autocapitalize="off" placeholder="iamBigson"></div>
+<div><label for="repo">Repo name</label><input id="repo" autocomplete="off" autocapitalize="off" placeholder="Cpage"></div>
+</div>
+<label for="token">Access token</label>
+<input id="token" type="password" autocomplete="off" placeholder="github_pat_...">
+<button id="save" type="button">Save connection</button>
+<p class="msg" id="saveMsg"></p>
+</details>
+
+<section class="card">
+<label for="kw">Keyword</label>
+<input id="kw" autocomplete="off" value="luxury private jet charter company">
+<label for="st">State</label>
+<input id="st" autocomplete="off" placeholder="Texas">
+<button id="run" type="button">Run search</button>
+<p class="msg" id="runMsg"></p>
+</section>
+
+<section class="card" aria-live="polite">
+<div class="status"><span class="dot" id="dot"></span><div><div class="big" id="stTitle">No run yet</div><div class="mute" id="stSub">Start a search to see live progress here.</div></div></div>
+</section>
+
+<section class="card">
+<div class="head"><h2>Run history</h2><button class="ghost" id="refresh" type="button">Refresh</button></div>
+<ul class="hist" id="hist"><li class="mute">Nothing here yet.</li></ul>
+</section>
+</main>
+
+<script>
+const WF = "find_leads.yml";
+const $ = id => document.getElementById(id);
+let timer = null;
+
+function store(k, v){ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k, v); }catch(e){ return null; } }
+function cfg(){ return { owner: store("cp_owner")||"", repo: store("cp_repo")||"", token: store("cp_token")||"" }; }
+function ready(){ const c = cfg(); return c.owner && c.repo && c.token; }
+
+async function gh(path, opts={}){
+  const c = cfg();
+  const res = await fetch("https://api.github.com/repos/"+c.owner+"/"+c.repo+path, {
+    ...opts,
+    headers: { "Authorization":"Bearer "+c.token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28", "Content-Type":"application/json" }
+  });
+  if(!res.ok){
+    let t = ""; try{ t = (await res.json()).message; }catch(e){}
+    const hint = res.status===401 ? "Token rejected. Generate a new one and save it again."
+      : res.status===403||res.status===404 ? "No access. Check the repo name and that the token has Actions read and write on this repo."
+      : (t||"GitHub error "+res.status);
+    throw new Error(hint);
+  }
+  return res.status===204 ? null : res.json();
+}
+
+function state(r){
+  if(r.status==="queued"||r.status==="waiting"||r.status==="pending") return ["queued","Queued","Waiting for GitHub to start your run."];
+  if(r.status==="in_progress") return ["running","Running","Searching, filtering Office 365 domains and reading contact pages."];
+  if(r.conclusion==="success") return ["done","Done","Leads were sent to your Telegram."];
+  if(r.conclusion==="cancelled") return ["failed","Cancelled","This run was cancelled."];
+  return ["failed","Failed","Open the run to see why. If the Serper key is out of credits, you also get a Telegram alert."];
+}
+
+function ago(iso){
+  const s = Math.max(1, Math.round((Date.now()-new Date(iso))/1000));
+  if(s<60) return s+"s ago"; if(s<3600) return Math.round(s/60)+"m ago";
+  if(s<86400) return Math.round(s/3600)+"h ago"; return Math.round(s/86400)+"d ago";
+}
+
+function paint(runs){
+  const hist = $("hist");
+  hist.textContent = "";
+  if(!runs.length){ const li = document.createElement("li"); li.className="mute"; li.textContent="Nothing here yet."; hist.appendChild(li); return; }
+  runs.forEach(r=>{
+    const [cls,label] = state(r);
+    const li = document.createElement("li");
+    const d = document.createElement("span"); d.className="dot "+cls;
+    const a = document.createElement("a"); a.href=r.html_url; a.target="_blank"; a.rel="noopener";
+    const t = document.createElement("div"); t.className="t"; t.textContent = (r.display_title||"Find Leads");
+    const m = document.createElement("div"); m.className="mute"; m.textContent = label+" · "+ago(r.created_at);
+    a.append(t,m); li.append(d,a); hist.appendChild(li);
+  });
+  const [cls,title,sub] = state(runs[0]);
+  $("dot").className = "dot "+cls; $("stTitle").textContent = title; $("stSub").textContent = sub;
+  const live = runs[0].status!=="completed";
+  clearTimeout(timer);
+  if(live) timer = setTimeout(load, 5000);
+}
+
+async function load(){
+  if(!ready()) return;
+  try{
+    const data = await gh("/actions/workflows/"+WF+"/runs?per_page=15");
+    paint(data.workflow_runs||[]);
+  }catch(e){ $("runMsg").className="msg err"; $("runMsg").textContent = e.message; }
+}
+
+$("save").onclick = ()=>{
+  const owner=$("owner").value.trim(), repo=$("repo").value.trim(), token=$("token").value.trim();
+  if(!owner||!repo||!token){ $("saveMsg").className="msg err"; $("saveMsg").textContent="Fill in all three fields."; return; }
+  store("cp_owner",owner); store("cp_repo",repo); store("cp_token",token);
+  $("token").value=""; $("saveMsg").className="msg"; $("saveMsg").textContent="Saved. Checking connection...";
+  gh("/actions/workflows/"+WF).then(()=>{ $("saveMsg").textContent="Connected."; $("setup").open=false; load(); })
+    .catch(e=>{ $("saveMsg").className="msg err"; $("saveMsg").textContent=e.message; });
+};
+
+$("run").onclick = async ()=>{
+  const kw=$("kw").value.trim(), st=$("st").value.trim(), msg=$("runMsg");
+  msg.className="msg";
+  if(!ready()){ msg.className="msg err"; msg.textContent="Connect your repo first."; $("setup").open=true; return; }
+  if(!kw||!st){ msg.className="msg err"; msg.textContent="Enter a keyword and a state."; return; }
+  $("run").disabled=true; msg.textContent="Starting...";
+  try{
+    await gh("/actions/workflows/"+WF+"/dispatches",{method:"POST",body:JSON.stringify({ref:"main",inputs:{keyword:kw,state:st}})});
+    msg.textContent="Run started.";
+    $("dot").className="dot queued"; $("stTitle").textContent="Queued"; $("stSub").textContent="Waiting for GitHub to start your run.";
+    setTimeout(load, 4000);
+  }catch(e){ msg.className="msg err"; msg.textContent=e.message; }
+  $("run").disabled=false;
+};
+
+$("refresh").onclick = load;
+
+(function init(){
+  const c = cfg();
+  $("owner").value = c.owner || ""; $("repo").value = c.repo || "";
+  if(ready()){ $("setup").open=false; load(); }
+})();
+</script>
+</body>
+</html>
